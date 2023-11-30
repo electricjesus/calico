@@ -93,7 +93,7 @@ $(BINDIR)/dikastes-%: protobuf $(SRC_FILES)
 ifeq ($(FIPS),true)
 	$(call build_cgo_boring_binary, ./cmd/dikastes, $@)
 else
-	$(call build_binary, ./cmd/dikastes, $@)
+	$(call build_cgo_binary, ./cmd/dikastes, $@)
 endif
 
 $(BINDIR)/healthz-amd64: ARCH=amd64
