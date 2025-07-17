@@ -24,6 +24,7 @@ import (
 
 	"github.com/projectcalico/calico/goldmane/pkg/client"
 	"github.com/projectcalico/calico/goldmane/pkg/internal/flowcache"
+	"github.com/projectcalico/calico/goldmane/pkg/otel"
 	"github.com/projectcalico/calico/goldmane/pkg/types"
 	"github.com/projectcalico/calico/goldmane/proto"
 	"github.com/projectcalico/calico/lib/std/time"
@@ -66,6 +67,7 @@ func NewFlowCollector(sink Sink) *flowCollectorService {
 	return &flowCollectorService{
 		sink:         sink,
 		deduplicator: flowcache.NewExpiringFlowCache(client.FlowCacheExpiry),
+		otelInstr:    otel.NewFlowInstrumentation("collector"),
 	}
 }
 
@@ -77,6 +79,9 @@ type flowCollectorService struct {
 
 	// deduplicator is used to deduplicate flows received from clients upon connection resets.
 	deduplicator *flowcache.ExpiringFlowCache
+
+	// otelInstr provides OpenTelemetry instrumentation
+	otelInstr *otel.FlowInstrumentation
 }
 
 func (p *flowCollectorService) Run() {
@@ -107,9 +112,14 @@ func (p *flowCollectorService) handleClient(srv proto.FlowCollector_ConnectServe
 	logCtx := logrus.WithField("who", scope)
 	logCtx.Info("Connection from client")
 
+	// Start OpenTelemetry span for client connection
+	_, span := p.otelInstr.StartFlowReceiveSpan(srv.Context(), scope)
+	defer span.End()
+
 	num := 0
 	defer func() {
 		logCtx.WithField("numFlows", num).Info("Connection from client completed.")
+		p.otelInstr.AddResultAttributes(span, num)
 	}()
 
 	for {
@@ -121,6 +131,7 @@ func (p *flowCollectorService) handleClient(srv proto.FlowCollector_ConnectServe
 		}
 		if err != nil {
 			logCtx.WithError(err).Error("Failed to receive flow")
+			p.otelInstr.RecordError(span, err)
 			return err
 		}
 		receivedFlowCounter.WithLabelValues(scope).Inc()
@@ -128,6 +139,10 @@ func (p *flowCollectorService) handleClient(srv proto.FlowCollector_ConnectServe
 
 		// Convert to minified types.Flow object.
 		flow := types.ProtoToFlow(upd.Flow)
+
+		// Add flow attributes to span
+		p.otelInstr.AddFlowAttributes(span, flow)
+		p.otelInstr.AddServiceGraphAttributes(span, flow)
 
 		// Skip flows that we have already received from this node. This is a simple deduplication
 		// mechanism to avoid processing the same flow if the connection is reset for some reason.
@@ -151,6 +166,7 @@ func (p *flowCollectorService) handleClient(srv proto.FlowCollector_ConnectServe
 		// Tell the client we have received the flow.
 		if err = srv.Send(&proto.FlowReceipt{}); err != nil {
 			logCtx.WithError(err).Error("Failed to send receipt")
+			p.otelInstr.RecordError(span, err)
 			return err
 		}
 

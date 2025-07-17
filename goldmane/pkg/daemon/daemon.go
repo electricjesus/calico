@@ -34,6 +34,7 @@ import (
 	"github.com/projectcalico/calico/goldmane/pkg/emitter"
 	"github.com/projectcalico/calico/goldmane/pkg/goldmane"
 	"github.com/projectcalico/calico/goldmane/pkg/internal/utils"
+	"github.com/projectcalico/calico/goldmane/pkg/otel"
 	"github.com/projectcalico/calico/goldmane/pkg/server"
 	"github.com/projectcalico/calico/goldmane/pkg/storage"
 	"github.com/projectcalico/calico/lib/std/time"
@@ -93,6 +94,17 @@ type Config struct {
 
 	// PrometheusPort is the port to listen on for serving Prometheus metrics.
 	PrometheusPort int `json:"prometheus_port" envconfig:"PROMETHEUS_PORT" default:"0"`
+
+	// OpenTelemetry configuration
+	OTLPURL           string `json:"otlp_url" envconfig:"OTLP_URL" default:"localhost:4317"`
+	OTLPInsecure      bool   `json:"otlp_insecure" envconfig:"OTLP_INSECURE" default:"false"`
+	OTLPHeaders       string `json:"otlp_headers" envconfig:"OTLP_HEADERS" default:""`
+	OTLPTimeout       int    `json:"otlp_timeout" envconfig:"OTLP_TIMEOUT" default:"10"`
+	OTLPRetry         int    `json:"otlp_retry" envconfig:"OTLP_RETRY" default:"3"`
+	OTLPCompression   bool   `json:"otlp_compression" envconfig:"OTLP_COMPRESSION" default:"false"`
+	OTLPLogLevel      string `json:"otlp_log_level" envconfig:"OTLP_LOG_LEVEL" default:"info"`
+	OTLPServiceName   string `json:"otlp_service_name" envconfig:"OTLP_SERVICE_NAME" default:"tigera-linseed"`
+	OTLPResourceAttrs string `json:"otlp_resource_attrs" envconfig:"OTLP_RESOURCE_ATTRS" default:""`
 }
 
 func ConfigFromEnv() Config {
@@ -123,6 +135,28 @@ func newGRPCServer(cfg *Config) (*grpc.Server, error) {
 func Run(ctx context.Context, cfg Config) {
 	logrus.WithField("cfg", cfg).Info("Loaded configuration")
 	defer logrus.Warn("Shutting down")
+
+	// Initialize OpenTelemetry
+	otelConfig := otel.Config{
+		Enabled:           cfg.OTLPURL != "",
+		CollectorEndpoint: cfg.OTLPURL,
+		ServiceName:       "goldmane",
+		ServiceVersion:    "dev", // TODO: Set from build-time variable
+		ServiceNamespace:  "calico-system",
+		NodeName:          os.Getenv("NODE_NAME"),
+		ClusterName:       os.Getenv("CLUSTER_NAME"),
+		SamplingRate:      0.1,
+	}
+
+	otelProvider, err := otel.NewProvider(ctx, otelConfig)
+	if err != nil {
+		logrus.WithError(err).Fatal("Failed to initialize OpenTelemetry")
+	}
+	defer func() {
+		if err := otelProvider.Shutdown(ctx); err != nil {
+			logrus.WithError(err).Error("Failed to shutdown OpenTelemetry")
+		}
+	}()
 
 	// Make an initial report that says we're live but not yet ready.
 	healthAggregator := health.NewHealthAggregator()

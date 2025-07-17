@@ -21,6 +21,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 
+	"github.com/projectcalico/calico/goldmane/pkg/otel"
 	"github.com/projectcalico/calico/goldmane/pkg/storage"
 	"github.com/projectcalico/calico/goldmane/pkg/stream"
 	"github.com/projectcalico/calico/goldmane/pkg/types"
@@ -185,6 +186,9 @@ type Goldmane struct {
 	// ratelimiter is used to rate limit log messages that may happen frequently.
 	rl *logutils.RateLimitedLogger
 
+	// OpenTelemetry instrumentation
+	otelInstr *otel.FlowInstrumentation
+
 	// The following channels are input channels to make resuests of the main loop.
 	listRequests        chan listRequest
 	filterHintsRequests chan filterHintsRequest
@@ -210,6 +214,7 @@ func NewGoldmane(opts ...Option) *Goldmane {
 			logutils.OptBurst(1),
 			logutils.OptInterval(15*time.Second),
 		),
+		otelInstr: otel.NewFlowInstrumentation("aggregator"),
 	}
 
 	// Apply options.
@@ -321,9 +326,18 @@ func (a *Goldmane) SetSink(s storage.Sink) chan struct{} {
 
 // Receive is used to send a flow update to the aggregator.
 func (a *Goldmane) Receive(f *types.Flow) {
-	if err := chanutil.WriteWithDeadline(context.Background(), a.recvChan, f, 5*time.Second); err != nil {
+	// Create a child span for flow aggregation (we don't have a parent context here)
+	ctx, span := a.otelInstr.StartFlowAggregateSpan(context.Background(), f.StartTime)
+	defer span.End()
+
+	// Add flow attributes to the span
+	a.otelInstr.AddFlowAttributes(span, f)
+	a.otelInstr.AddServiceGraphAttributes(span, f)
+
+	if err := chanutil.WriteWithDeadline(ctx, a.recvChan, f, 5*time.Second); err != nil {
 		numDroppedFlows.Inc()
 		a.rl.Warn("Aggregator receive channel full, dropping flow(s)")
+		a.otelInstr.RecordError(span, err)
 	}
 }
 

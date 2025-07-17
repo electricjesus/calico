@@ -22,6 +22,7 @@ import (
 	"strconv"
 
 	"github.com/sirupsen/logrus"
+	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -29,6 +30,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/projectcalico/calico/goldmane/pkg/otel"
 	"github.com/projectcalico/calico/goldmane/pkg/storage"
 	"github.com/projectcalico/calico/goldmane/pkg/types"
 	"github.com/projectcalico/calico/lib/std/time"
@@ -64,6 +66,9 @@ type Emitter struct {
 	// Track the latest timestamp of emitted flows. This helps us avoid emitting the same flow multiple times
 	// on restart.
 	latestTimestamp int64
+
+	// OpenTelemetry instrumentation
+	otelInstr *otel.FlowInstrumentation
 }
 
 // Make sure Emitter implements the Receiver interface to be able to receive aggregated Flows.
@@ -77,6 +82,7 @@ func NewEmitter(opts ...Option) *Emitter {
 				workqueue.NewTypedItemExponentialFailureRateLimiter[bucketKey](1*time.Second, 30*time.Second),
 				&workqueue.TypedBucketRateLimiter[bucketKey]{Limiter: rate.NewLimiter(rate.Limit(10), 100)},
 			)),
+		otelInstr: otel.NewFlowInstrumentation("emitter"),
 	}
 
 	for _, opt := range opts {
@@ -198,20 +204,33 @@ func (e *Emitter) forget(k bucketKey) {
 }
 
 func (e *Emitter) emit(bucket *storage.FlowCollection) error {
+	// Start OpenTelemetry span for flow emission
+	_, span := e.otelInstr.StartFlowEmitSpan(context.Background(), e.url)
+	defer span.End()
+
+	// Add bucket metadata to span
+	span.SetAttributes(
+		attribute.Int64("bucket.timestamp", bucket.EndTime),
+		attribute.Int64("bucket.flow_count", int64(len(bucket.Flows))),
+	)
+
 	// Check if we have already emitted this batch. If it pre-dates
 	// the latest timestamp we've emitted, skip it. This can happen, for example, on restart when
 	// we learn already emitted flows from the cache.
 	if bucket.EndTime <= e.latestTimestamp {
 		logrus.WithField("bucketEndTime", bucket.EndTime).Debug("Skipping already emitted flows.")
+		span.SetAttributes(attribute.Bool("emit.skipped", true))
 		return nil
 	}
 
 	// Marshal the flows to JSON and send them to the emitter.
 	rdr, err := e.collectionToReader(bucket)
 	if err != nil {
+		e.otelInstr.RecordError(span, err)
 		return err
 	}
 	if err := e.client.Post(rdr); err != nil {
+		e.otelInstr.RecordError(span, err)
 		return err
 	}
 
@@ -222,6 +241,8 @@ func (e *Emitter) emit(bucket *storage.FlowCollection) error {
 	if err = e.saveState(); err != nil {
 		logrus.WithError(err).Warn("Error saving state.")
 	}
+
+	span.SetAttributes(attribute.Bool("emit.success", true))
 	return nil
 }
 
