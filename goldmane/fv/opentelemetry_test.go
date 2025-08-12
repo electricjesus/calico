@@ -81,6 +81,7 @@ type mockOTLPCollector struct {
 	traces []OTLPTrace
 	server *grpc.Server
 	lis    net.Listener
+	port   int
 }
 
 func newMockOTLPCollector() *mockOTLPCollector {
@@ -91,17 +92,24 @@ func newMockOTLPCollector() *mockOTLPCollector {
 	// Create gRPC server
 	collector.server = grpc.NewServer()
 
-	// Create listener
+	// Create listener on random port
 	lis, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
 		panic(err)
 	}
 	collector.lis = lis
 
+	// Extract the actual port number
+	if tcpAddr, ok := lis.Addr().(*net.TCPAddr); ok {
+		collector.port = tcpAddr.Port
+	} else {
+		panic("Failed to get TCP address from listener")
+	}
+
 	// Start server in background
 	go func() {
 		if err := collector.server.Serve(lis); err != nil {
-			logrus.WithError(err).Error("Failed to serve gRPC server")
+			logrus.WithError(err).Debug("gRPC server stopped")
 		}
 	}()
 
@@ -165,6 +173,16 @@ func (m *mockOTLPCollector) URL() string {
 	return m.lis.Addr().String()
 }
 
+// GetPort returns the port the collector is listening on
+func (m *mockOTLPCollector) GetPort() int {
+	return m.port
+}
+
+// GetEndpoint returns the gRPC endpoint (host:port) without any path
+func (m *mockOTLPCollector) GetEndpoint() string {
+	return fmt.Sprintf("localhost:%d", m.port)
+}
+
 // Test OpenTelemetry integration with a real OTLP collector
 func TestOpenTelemetryIntegration(t *testing.T) {
 	RegisterTestingT(t)
@@ -190,7 +208,7 @@ func TestOpenTelemetryIntegration(t *testing.T) {
 		ProfilePort:              0,
 
 		// OpenTelemetry configuration
-		OTLPURL:      collector.URL() + "/v1/traces",
+		OTLPURL:      collector.GetEndpoint(),
 		OTLPInsecure: true,
 	}
 
@@ -344,6 +362,31 @@ func TestOpenTelemetryIntegration(t *testing.T) {
 	})
 }
 
+// Test mock collector port functionality
+func TestMockCollectorPort(t *testing.T) {
+	// Create mock collector
+	collector := newMockOTLPCollector()
+	defer collector.Close()
+
+	// Test that we can get the port
+	port := collector.GetPort()
+	require.Greater(t, port, 0, "Port should be greater than 0")
+	require.Less(t, port, 65536, "Port should be less than 65536")
+
+	// Test that endpoint doesn't include path
+	endpoint := collector.GetEndpoint()
+	require.Equal(t, fmt.Sprintf("localhost:%d", port), endpoint)
+	require.NotContains(t, endpoint, "/v1/traces", "Endpoint should not contain path")
+
+	// Test that URL and endpoint give consistent port
+	url := collector.URL()
+	require.Contains(t, url, fmt.Sprintf(":%d", port))
+
+	t.Logf("Mock collector running on port %d", port)
+	t.Logf("Endpoint: %s", endpoint)
+	t.Logf("URL: %s", url)
+}
+
 // Test OpenTelemetry configuration and provider lifecycle
 func TestOpenTelemetryProvider(t *testing.T) {
 	RegisterTestingT(t)
@@ -370,7 +413,7 @@ func TestOpenTelemetryProvider(t *testing.T) {
 
 		cfg := otel.Config{
 			Enabled:           true,
-			CollectorEndpoint: collector.URL() + "/v1/traces",
+			CollectorEndpoint: collector.GetEndpoint(),
 			ServiceName:       "test-service",
 			ServiceVersion:    "test-version",
 			ServiceNamespace:  "test-namespace",
@@ -464,7 +507,7 @@ func TestOpenTelemetryEndToEnd(t *testing.T) {
 	// Configure OpenTelemetry
 	otelConfig := otel.Config{
 		Enabled:           true,
-		CollectorEndpoint: collector.URL() + "/v1/traces",
+		CollectorEndpoint: collector.GetEndpoint(),
 		ServiceName:       "goldmane-e2e-test",
 		ServiceVersion:    "test",
 		ServiceNamespace:  "test-ns",
