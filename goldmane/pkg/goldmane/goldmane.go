@@ -22,6 +22,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/projectcalico/calico/goldmane/pkg/otel"
 	"github.com/projectcalico/calico/goldmane/pkg/storage"
@@ -328,18 +329,20 @@ func (a *Goldmane) SetSink(s storage.Sink) chan struct{} {
 
 // Receive is used to send a flow update to the aggregator.
 func (a *Goldmane) Receive(f *types.Flow) {
-	// Create a child span for flow aggregation (we don't have a parent context here)
-	ctx, span := a.otelInstr.StartFlowAggregateSpan(context.Background(), f.StartTime)
-	defer span.End()
+	ctx := context.Background()
 
-	// Add flow attributes to the span
-	a.otelInstr.AddFlowAttributes(span, f)
-	a.otelInstr.AddServiceGraphAttributes(span, f)
+	// For high-throughput scenarios, we don't create spans for every individual flow
+	// as this creates significant overhead. Instead, we rely on batch-level spans
+	// and aggregate metrics to provide observability.
 
 	if err := chanutil.WriteWithDeadline(ctx, a.recvChan, f, 5*time.Second); err != nil {
 		numDroppedFlows.Inc()
 		a.rl.Warn("Aggregator receive channel full, dropping flow(s)")
+
+		// Only create a span when there's an error for debugging purposes
+		_, span := a.otelInstr.StartFlowAggregateSpan(context.Background(), f.StartTime)
 		a.otelInstr.RecordError(span, err)
+		span.End()
 	}
 }
 
@@ -606,6 +609,10 @@ func (a *Goldmane) rollover() time.Duration {
 }
 
 func (a *Goldmane) handleFlowBatch(first *types.Flow) {
+	// Create a span for the entire batch processing
+	_, span := a.otelInstr.StartFlowAggregateSpan(context.Background(), first.StartTime)
+	defer span.End()
+
 	// Index the flow that triggered the batch.
 	a.indexFlow(first)
 
@@ -622,6 +629,13 @@ func (a *Goldmane) handleFlowBatch(first *types.Flow) {
 		}
 	}
 	logrus.WithField("num", numHandled).Debug("Processed flow batch")
+
+	// Add batch-level attributes to the span
+	span.SetAttributes(
+		attribute.Int("goldmane.batch.flows_processed", numHandled),
+		attribute.Int64("goldmane.aggregator.unique_flows", a.flowStore.Size()),
+		attribute.Int("goldmane.aggregator.channel_size", len(a.recvChan)),
+	)
 
 	// Set the number of unique flows in the aggregator based on the number of DiachronicFlows.
 	numUniqueFlows.Set(float64(a.flowStore.Size()))
