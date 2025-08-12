@@ -64,7 +64,7 @@ gen-files: $(GENERATED_FILES) gen-mocks
 ###############################################################################
 ci: static-checks ut
 UT_PACKAGES := ./...
-UT_FLAGS := -coverprofile coverage.profile -count 1
+UT_FLAGS := -coverprofile coverage.profile -race -count 1
 ut:
 	$(DOCKER_GO_BUILD) go test $(UT_PACKAGES) $(UT_FLAGS)
 
