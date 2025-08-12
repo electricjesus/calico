@@ -29,8 +29,6 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 	"go.opentelemetry.io/otel/trace"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 const (
@@ -49,6 +47,10 @@ type Config struct {
 	// CollectorEndpoint is the endpoint of the OpenTelemetry collector
 	CollectorEndpoint string
 
+	// CollectorEndpointUseInsecure determines if the connection to the collector is insecure
+	// (adds `insecure` option to the gRPC client)
+	CollectorEndpointUseInsecure bool
+
 	// ServiceName is the name of the service
 	ServiceName string
 
@@ -66,22 +68,6 @@ type Config struct {
 
 	// SamplingRate is the rate at which traces are sampled (0.0 to 1.0)
 	SamplingRate float64
-}
-
-// ConfigFromEnv loads OpenTelemetry configuration from environment variables
-func ConfigFromEnv() Config {
-	enabled := os.Getenv("OTEL_ENABLED") == "true"
-
-	return Config{
-		Enabled:           enabled,
-		CollectorEndpoint: getEnvWithDefault("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"),
-		ServiceName:       getEnvWithDefault("OTEL_SERVICE_NAME", ServiceName),
-		ServiceVersion:    getEnvWithDefault("OTEL_SERVICE_VERSION", ServiceVersion),
-		ServiceNamespace:  getEnvWithDefault("OTEL_SERVICE_NAMESPACE", "calico-system"),
-		NodeName:          getEnvWithDefault("NODE_NAME", "unknown"),
-		ClusterName:       getEnvWithDefault("CLUSTER_NAME", "unknown"),
-		SamplingRate:      getEnvFloatWithDefault("OTEL_SAMPLING_RATE", 0.1),
-	}
 }
 
 // Provider manages OpenTelemetry providers and their lifecycle
@@ -112,10 +98,15 @@ func NewProvider(ctx context.Context, config Config) (*Provider, error) {
 	}
 
 	// Create OTLP trace exporter
-	traceExporter, err := otlptrace.New(ctx, otlptracegrpc.NewClient(
+	newClientOptions := []otlptracegrpc.Option{
 		otlptracegrpc.WithEndpoint(config.CollectorEndpoint),
-		otlptracegrpc.WithDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())),
-	))
+	}
+
+	if config.CollectorEndpointUseInsecure {
+		newClientOptions = append(newClientOptions, otlptracegrpc.WithInsecure())
+	}
+
+	traceExporter, err := otlptrace.New(ctx, otlptracegrpc.NewClient(newClientOptions...))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create trace exporter: %w", err)
 	}

@@ -3,7 +3,6 @@ package fv
 import (
 	"context"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -124,29 +123,5 @@ func TestOpenTelemetryBasic(t *testing.T) {
 		instr.AddResultAttributes(span, 42)
 
 		span.End()
-	})
-}
-
-// TestOpenTelemetryConfig tests OpenTelemetry configuration
-func TestOpenTelemetryConfig(t *testing.T) {
-	t.Run("ConfigFromEnv", func(t *testing.T) {
-		// Test default config
-		cfg := otel.ConfigFromEnv()
-		require.False(t, cfg.Enabled) // Should be false without OTEL_ENABLED=true
-
-		// Test with environment variables
-		os.Setenv("OTEL_ENABLED", "true")
-		os.Setenv("OTEL_SERVICE_NAME", "test-service")
-		os.Setenv("OTEL_SERVICE_VERSION", "1.0.0")
-		defer func() {
-			os.Unsetenv("OTEL_ENABLED")
-			os.Unsetenv("OTEL_SERVICE_NAME")
-			os.Unsetenv("OTEL_SERVICE_VERSION")
-		}()
-
-		cfg = otel.ConfigFromEnv()
-		require.True(t, cfg.Enabled)
-		require.Equal(t, "test-service", cfg.ServiceName)
-		require.Equal(t, "1.0.0", cfg.ServiceVersion)
 	})
 }

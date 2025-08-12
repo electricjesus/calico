@@ -96,15 +96,21 @@ type Config struct {
 	PrometheusPort int `json:"prometheus_port" envconfig:"PROMETHEUS_PORT" default:"0"`
 
 	// OpenTelemetry configuration
-	OTLPURL           string `json:"otlp_url" envconfig:"OTLP_URL" default:"localhost:4317"`
-	OTLPInsecure      bool   `json:"otlp_insecure" envconfig:"OTLP_INSECURE" default:"false"`
-	OTLPHeaders       string `json:"otlp_headers" envconfig:"OTLP_HEADERS" default:""`
-	OTLPTimeout       int    `json:"otlp_timeout" envconfig:"OTLP_TIMEOUT" default:"10"`
-	OTLPRetry         int    `json:"otlp_retry" envconfig:"OTLP_RETRY" default:"3"`
-	OTLPCompression   bool   `json:"otlp_compression" envconfig:"OTLP_COMPRESSION" default:"false"`
-	OTLPLogLevel      string `json:"otlp_log_level" envconfig:"OTLP_LOG_LEVEL" default:"info"`
-	OTLPServiceName   string `json:"otlp_service_name" envconfig:"OTLP_SERVICE_NAME" default:"tigera-linseed"`
-	OTLPResourceAttrs string `json:"otlp_resource_attrs" envconfig:"OTLP_RESOURCE_ATTRS" default:""`
+	OTLPURL              string  `json:"otlp_url" envconfig:"OTLP_URL" default:"localhost:4317"`
+	OTLPInsecure         bool    `json:"otlp_insecure" envconfig:"OTLP_INSECURE" default:"false"`
+	OTLPHeaders          string  `json:"otlp_headers" envconfig:"OTLP_HEADERS" default:""`
+	OTLPTimeout          int     `json:"otlp_timeout" envconfig:"OTLP_TIMEOUT" default:"10"`
+	OTLPRetry            int     `json:"otlp_retry" envconfig:"OTLP_RETRY" default:"3"`
+	OTLPCompression      bool    `json:"otlp_compression" envconfig:"OTLP_COMPRESSION" default:"false"`
+	OTLPLogLevel         string  `json:"otlp_log_level" envconfig:"OTLP_LOG_LEVEL" default:"info"`
+	OTLPServiceName      string  `json:"otlp_service_name" envconfig:"OTLP_SERVICE_NAME" default:"goldmane"`
+	OTLPServiceNamespace string  `json:"otlp_service_namespace" envconfig:"OTLP_SERVICE_NAMESPACE" default:"calico-system"`
+	OTLPServiceVersion   string  `json:"otlp_service_version" envconfig:"OTLP_SERVICE_VERSION" default:"dev"`
+	OTLPResourceAttrs    string  `json:"otlp_resource_attrs" envconfig:"OTLP_RESOURCE_ATTRS" default:""`
+	OTLPSamplingRate     float64 `json:"otlp_sampling_rate" envconfig:"OTLP_SAMPLING_RATE" default:"0.1"`
+	// should i put OTLP prefixes for the following?
+	NodeName    string `json:"node_name" envconfig:"NODE_NAME" default:"unknown"`
+	ClusterName string `json:"cluster_name" envconfig:"CLUSTER_NAME" default:"unknown"`
 }
 
 func ConfigFromEnv() Config {
@@ -138,14 +144,15 @@ func Run(ctx context.Context, cfg Config) {
 
 	// Initialize OpenTelemetry
 	otelConfig := otel.Config{
-		Enabled:           cfg.OTLPURL != "",
-		CollectorEndpoint: cfg.OTLPURL,
-		ServiceName:       "goldmane",
-		ServiceVersion:    "dev", // TODO: Set from build-time variable
-		ServiceNamespace:  "calico-system",
-		NodeName:          os.Getenv("NODE_NAME"),
-		ClusterName:       os.Getenv("CLUSTER_NAME"),
-		SamplingRate:      0.1,
+		Enabled:                      cfg.OTLPURL != "",
+		CollectorEndpoint:            cfg.OTLPURL,
+		CollectorEndpointUseInsecure: cfg.OTLPInsecure,
+		ServiceName:                  cfg.OTLPServiceName,
+		ServiceVersion:               cfg.OTLPServiceVersion,
+		ServiceNamespace:             cfg.OTLPServiceNamespace,
+		NodeName:                     cfg.NodeName,
+		ClusterName:                  cfg.ClusterName,
+		SamplingRate:                 cfg.OTLPSamplingRate,
 	}
 
 	otelProvider, err := otel.NewProvider(ctx, otelConfig)

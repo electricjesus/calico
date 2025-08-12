@@ -219,20 +219,20 @@ func (m *mockOTLPCollector) GetSpansWithName(name string) []Span {
 	defer m.Unlock()
 
 	var spans []Span
-	logrus.WithField("spanName", name).Info("Searching for spans with name")
-	logrus.WithField("traceCount", len(m.traces)).Info("Total traces to search")
-	logrus.WithField("spanCount", len(spans)).Info("Initial span count")
+	logrus.WithField("spanName", name).Debug("Searching for spans with name")
+	logrus.WithField("traceCount", len(m.traces)).Debug("Total traces to search")
+	logrus.WithField("spanCount", len(spans)).Debug("Initial span count")
 	for _, trace := range m.traces {
-		logrus.WithField("traceSpans", len(trace.ResourceSpans)).Info("Processing trace spans")
+		logrus.WithField("traceSpans", len(trace.ResourceSpans)).Debug("Processing trace spans")
 		for _, rs := range trace.ResourceSpans {
-			logrus.WithField("scopeSpansCount", len(rs.ScopeSpans)).Info("Processing resource spans")
+			logrus.WithField("scopeSpansCount", len(rs.ScopeSpans)).Debug("Processing resource spans")
 			for _, ss := range rs.ScopeSpans {
-				logrus.WithField("scopeName", ss.Scope).Info("Processing scope spans")
+				logrus.WithField("scopeName", ss.Scope).Debug("Processing scope spans")
 				for _, span := range ss.Spans {
 					if span.Name == name {
 						spans = append(spans, span)
 					} else {
-						logrus.WithField("spanName", span.Name).Info("Skipping span with different name")
+						logrus.WithField("spanName", span.Name).Debug("Skipping span with different name")
 					}
 				}
 			}
@@ -315,6 +315,7 @@ func TestOpenTelemetryIntegration(t *testing.T) {
 	// Set up environment variables for OpenTelemetry
 	t.Setenv("OTEL_SERVICE_NAME", "goldmane-test")
 	t.Setenv("OTEL_SERVICE_NAMESPACE", "test-namespace")
+	t.Setenv("OTEL_INSECURE", "true")
 	t.Setenv("NODE_NAME", "test-node")
 	t.Setenv("CLUSTER_NAME", "test-cluster")
 
@@ -613,15 +614,15 @@ func TestOpenTelemetryEndToEnd(t *testing.T) {
 		ProfilePort:              0,
 
 		// OpenTelemetry configuration
-		OTLPURL:      collector.GetEndpoint(),
-		OTLPInsecure: true,
+		OTLPServiceName:      "goldmane-test",
+		OTLPServiceNamespace: "test-namespace",
+		OTLPServiceVersion:   "dev",
+		OTLPURL:              collector.GetEndpoint(),
+		OTLPInsecure:         true,
+		OTLPSamplingRate:     1.0,
+		NodeName:             "test-node",
+		ClusterName:          "test-cluster",
 	}
-
-	// Set up environment variables for OpenTelemetry
-	t.Setenv("OTEL_SERVICE_NAME", "goldmane-e2e-test")
-	t.Setenv("OTEL_SERVICE_NAMESPACE", "test-ns")
-	t.Setenv("NODE_NAME", "test-node")
-	t.Setenv("CLUSTER_NAME", "test-cluster")
 
 	// Start daemon
 	cleanup := otelDaemonSetup(t, cfg)

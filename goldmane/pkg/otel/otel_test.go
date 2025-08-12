@@ -12,16 +12,6 @@ import (
 	"github.com/projectcalico/calico/goldmane/proto"
 )
 
-func TestOTelConfig(t *testing.T) {
-	// Test default configuration
-	cfg := ConfigFromEnv()
-	assert.False(t, cfg.Enabled, "OpenTelemetry should be disabled by default")
-	assert.Equal(t, "http://localhost:4317", cfg.CollectorEndpoint)
-	assert.Equal(t, "goldmane", cfg.ServiceName)
-	assert.Equal(t, "calico-system", cfg.ServiceNamespace)
-	assert.Equal(t, 0.1, cfg.SamplingRate)
-}
-
 func TestOTelProvider(t *testing.T) {
 	ctx := context.Background()
 
