@@ -63,8 +63,10 @@ gen-files: $(GENERATED_FILES) gen-mocks
 # UTs
 ###############################################################################
 ci: static-checks ut
+UT_PACKAGES := ./...
+UT_FLAGS := -coverprofile coverage.profile -race -count 1
 ut:
-	$(DOCKER_GO_BUILD) go test ./... -coverprofile coverage.profile -race -count 1
+	$(DOCKER_GO_BUILD) go test $(UT_PACKAGES) $(UT_FLAGS)
 
 gen-mocks:
 	$(DOCKER_RUN) $(CALICO_BUILD) sh -c 'mockery'
