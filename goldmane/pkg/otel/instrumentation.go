@@ -17,6 +17,7 @@ package otel
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -249,4 +250,140 @@ func protocolToString(protocol int32) string {
 	default:
 		return fmt.Sprintf("protocol-%d", protocol)
 	}
+}
+
+// CreateServiceFlowTrace creates a trace span representing communication between services
+// This transforms network flow data into service-to-service OpenTelemetry traces
+func (fi *FlowInstrumentation) CreateServiceFlowTrace(ctx context.Context, flow *types.Flow) (context.Context, trace.Span) {
+	if flow == nil || flow.Key == nil {
+		return ctx, trace.SpanFromContext(ctx)
+	}
+
+	// Create a span representing the communication from source to destination service
+	serviceName := fmt.Sprintf("%s.%s", flow.Key.SourceName(), flow.Key.SourceNamespace())
+	destinationService := fmt.Sprintf("%s.%s", flow.Key.DestName(), flow.Key.DestNamespace())
+
+	spanName := fmt.Sprintf("%s → %s", serviceName, destinationService)
+
+	spanCtx, span := fi.tracer.Start(ctx, spanName,
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithTimestamp(time.Unix(flow.StartTime, 0)),
+	)
+
+	// Add service graph attributes for observability tools
+	attrs := []attribute.KeyValue{
+		// Service identification
+		attribute.String("service.name", serviceName),
+		attribute.String("service.namespace", flow.Key.SourceNamespace()),
+		attribute.String("service.destination.name", destinationService),
+		attribute.String("service.destination.namespace", flow.Key.DestNamespace()),
+
+		// Network details
+		attribute.String("network.protocol", flow.Key.Proto()),
+		attribute.Int64("network.destination.port", flow.Key.DestPort()),
+
+		// Flow metrics
+		attribute.Int64("flow.packets.in", flow.PacketsIn),
+		attribute.Int64("flow.packets.out", flow.PacketsOut),
+		attribute.Int64("flow.bytes.in", flow.BytesIn),
+		attribute.Int64("flow.bytes.out", flow.BytesOut),
+		attribute.Int64("flow.connections.started", flow.NumConnectionsStarted),
+		attribute.Int64("flow.connections.completed", flow.NumConnectionsCompleted),
+		attribute.Int64("flow.connections.live", flow.NumConnectionsLive),
+
+		// Timing
+		attribute.Int64("flow.start_time", flow.StartTime),
+		attribute.Int64("flow.end_time", flow.EndTime),
+		attribute.Int64("flow.duration", flow.EndTime-flow.StartTime),
+	}
+
+	// Add destination service information if available
+	if flow.Key.DestServiceName() != "" {
+		attrs = append(attrs,
+			attribute.String("service.destination.k8s.name", flow.Key.DestServiceName()),
+			attribute.String("service.destination.k8s.namespace", flow.Key.DestServiceNamespace()),
+		)
+		if flow.Key.DestServicePortName() != "" {
+			attrs = append(attrs, attribute.String("service.destination.k8s.port.name", flow.Key.DestServicePortName()))
+		}
+	}
+
+	span.SetAttributes(attrs...)
+
+	// Set the span end time
+	span.End(trace.WithTimestamp(time.Unix(flow.EndTime, 0)))
+
+	return spanCtx, span
+}
+
+// CreateServiceFlowTraceFromProto creates a trace span from a proto.Flow
+func (fi *FlowInstrumentation) CreateServiceFlowTraceFromProto(ctx context.Context, flow *proto.Flow) (context.Context, trace.Span) {
+	if flow == nil || flow.Key == nil {
+		return ctx, trace.SpanFromContext(ctx)
+	}
+
+	// Create a span representing the communication from source to destination service
+	serviceName := fmt.Sprintf("%s.%s", flow.Key.SourceName, flow.Key.SourceNamespace)
+	destinationService := fmt.Sprintf("%s.%s", flow.Key.DestName, flow.Key.DestNamespace)
+
+	spanName := fmt.Sprintf("%s → %s", serviceName, destinationService)
+
+	spanCtx, span := fi.tracer.Start(ctx, spanName,
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithTimestamp(time.Unix(flow.StartTime, 0)),
+	)
+
+	// Add service graph attributes for observability tools
+	attrs := []attribute.KeyValue{
+		// Service identification
+		attribute.String("service.name", serviceName),
+		attribute.String("service.namespace", flow.Key.SourceNamespace),
+		attribute.String("service.destination.name", destinationService),
+		attribute.String("service.destination.namespace", flow.Key.DestNamespace),
+
+		// Network details
+		attribute.String("network.protocol", flow.Key.Proto),
+		attribute.Int64("network.destination.port", flow.Key.DestPort),
+
+		// Flow metrics
+		attribute.Int64("flow.packets.in", flow.PacketsIn),
+		attribute.Int64("flow.packets.out", flow.PacketsOut),
+		attribute.Int64("flow.bytes.in", flow.BytesIn),
+		attribute.Int64("flow.bytes.out", flow.BytesOut),
+		attribute.Int64("flow.connections.started", flow.NumConnectionsStarted),
+		attribute.Int64("flow.connections.completed", flow.NumConnectionsCompleted),
+		attribute.Int64("flow.connections.live", flow.NumConnectionsLive),
+
+		// Timing
+		attribute.Int64("flow.start_time", flow.StartTime),
+		attribute.Int64("flow.end_time", flow.EndTime),
+		attribute.Int64("flow.duration", flow.EndTime-flow.StartTime),
+	}
+
+	// Add destination service information if available
+	if flow.Key.DestServiceName != "" {
+		attrs = append(attrs,
+			attribute.String("service.destination.k8s.name", flow.Key.DestServiceName),
+			attribute.String("service.destination.k8s.namespace", flow.Key.DestServiceNamespace),
+		)
+		if flow.Key.DestServicePortName != "" {
+			attrs = append(attrs, attribute.String("service.destination.k8s.port.name", flow.Key.DestServicePortName))
+		}
+	}
+
+	// Add policy enforcement information
+	if flow.Key != nil && flow.Key.Policies != nil && (len(flow.Key.Policies.EnforcedPolicies) > 0 || len(flow.Key.Policies.PendingPolicies) > 0) {
+		attrs = append(attrs,
+			attribute.String("flow.policies.enforced", "true"),
+			attribute.Int64("flow.policies.enforced.count", int64(len(flow.Key.Policies.EnforcedPolicies))),
+			attribute.Int64("flow.policies.pending.count", int64(len(flow.Key.Policies.PendingPolicies))),
+		)
+	}
+
+	span.SetAttributes(attrs...)
+
+	// Set the span end time
+	span.End(trace.WithTimestamp(time.Unix(flow.EndTime, 0)))
+
+	return spanCtx, span
 }

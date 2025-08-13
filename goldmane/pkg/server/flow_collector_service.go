@@ -144,6 +144,11 @@ func (p *flowCollectorService) handleClient(srv proto.FlowCollector_ConnectServe
 		p.otelInstr.AddFlowAttributes(span, flow)
 		p.otelInstr.AddServiceGraphAttributes(span, flow)
 
+		// Create a service-to-service trace for this flow
+		// This generates traces representing actual network communication between services
+		_, _ = p.otelInstr.CreateServiceFlowTrace(srv.Context(), flow)
+		// Note: serviceSpan is ended automatically in CreateServiceFlowTrace with the flow timing
+
 		// Skip flows that we have already received from this node. This is a simple deduplication
 		// mechanism to avoid processing the same flow if the connection is reset for some reason.
 		// Should this happen, the client will resend all its flows and we must ensure we don't process

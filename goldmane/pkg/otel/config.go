@@ -17,7 +17,6 @@ package otel
 import (
 	"context"
 	"fmt"
-	"os"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -157,22 +156,4 @@ func (p *Provider) GetTracer(name string) trace.Tracer {
 		return otel.GetTracerProvider().Tracer(name)
 	}
 	return otel.Tracer(name)
-}
-
-// Helper functions
-
-func getEnvWithDefault(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
-}
-
-func getEnvFloatWithDefault(key string, defaultValue float64) float64 {
-	if value := os.Getenv(key); value != "" {
-		if parsed, err := fmt.Sscanf(value, "%f", &defaultValue); err == nil && parsed == 1 {
-			return defaultValue
-		}
-	}
-	return defaultValue
 }
