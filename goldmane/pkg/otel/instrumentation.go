@@ -259,58 +259,221 @@ func (fi *FlowInstrumentation) CreateServiceFlowTrace(ctx context.Context, flow 
 		return ctx, trace.SpanFromContext(ctx)
 	}
 
-	// Create a span representing the communication from source to destination service
-	serviceName := fmt.Sprintf("%s.%s", flow.Key.SourceName(), flow.Key.SourceNamespace())
-	destinationService := fmt.Sprintf("%s.%s", flow.Key.DestName(), flow.Key.DestNamespace())
+	// Create both client and server spans for better service graph visibility
+	return fi.CreateFullServiceTrace(ctx, flow)
+}
 
-	spanName := fmt.Sprintf("%s → %s", serviceName, destinationService)
+// CreateFullServiceTrace creates a comprehensive service-to-service trace with both client and server perspectives
+func (fi *FlowInstrumentation) CreateFullServiceTrace(ctx context.Context, flow *types.Flow) (context.Context, trace.Span) {
+	if flow == nil || flow.Key == nil {
+		return ctx, trace.SpanFromContext(ctx)
+	}
 
-	spanCtx, span := fi.tracer.Start(ctx, spanName,
+	// Extract service names with namespace for uniqueness
+	sourceServiceName := fmt.Sprintf("%s.%s", flow.Key.SourceName(), flow.Key.SourceNamespace())
+	destServiceName := fmt.Sprintf("%s.%s", flow.Key.DestName(), flow.Key.DestNamespace())
+
+	// Use Kubernetes service name if available
+	if flow.Key.DestServiceName() != "" {
+		destServiceName = fmt.Sprintf("%s.%s", flow.Key.DestServiceName(), flow.Key.DestServiceNamespace())
+	}
+
+	// Clean up service names
+	if sourceServiceName == "." || sourceServiceName == "" {
+		sourceServiceName = "unknown-source"
+	}
+	if destServiceName == "." || destServiceName == "" {
+		destServiceName = "unknown-dest"
+	}
+
+	// Create parent span from source service perspective (CLIENT)
+	sourceTracer := otel.Tracer(sourceServiceName)
+	operationName := fmt.Sprintf("call %s", destServiceName)
+
+	parentCtx, parentSpan := sourceTracer.Start(ctx, operationName,
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithTimestamp(time.Unix(flow.StartTime, 0)),
 	)
 
-	// Add service graph attributes for observability tools
-	attrs := []attribute.KeyValue{
-		// Service identification
-		attribute.String("service.name", serviceName),
+	// Add client-side attributes
+	clientAttrs := []attribute.KeyValue{
+		attribute.String("service.name", sourceServiceName),
 		attribute.String("service.namespace", flow.Key.SourceNamespace()),
-		attribute.String("service.destination.name", destinationService),
-		attribute.String("service.destination.namespace", flow.Key.DestNamespace()),
+		attribute.String("peer.service", destServiceName),
+		attribute.String("span.kind", "client"),
+		attribute.String("component", "network-flow"),
+		attribute.String("operation.type", "outbound-call"),
 
 		// Network details
-		attribute.String("network.protocol", flow.Key.Proto()),
-		attribute.Int64("network.destination.port", flow.Key.DestPort()),
+		attribute.String("network.protocol.name", flow.Key.Proto()),
+		attribute.Int64("network.peer.port", flow.Key.DestPort()),
+
+		// Flow metrics
+		attribute.Int64("flow.packets.out", flow.PacketsOut),
+		attribute.Int64("flow.bytes.out", flow.BytesOut),
+		attribute.Int64("flow.connections.started", flow.NumConnectionsStarted),
+		attribute.Int64("duration.ms", (flow.EndTime-flow.StartTime)*1000),
+	}
+
+	parentSpan.SetAttributes(clientAttrs...)
+
+	// Create child span from destination service perspective (SERVER)
+	destTracer := otel.Tracer(destServiceName)
+	serverOperationName := fmt.Sprintf("receive from %s", sourceServiceName)
+
+	_, serverSpan := destTracer.Start(parentCtx, serverOperationName,
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithTimestamp(time.Unix(flow.StartTime, 0)),
+	)
+
+	// Add server-side attributes
+	serverAttrs := []attribute.KeyValue{
+		attribute.String("service.name", destServiceName),
+		attribute.String("service.namespace", flow.Key.DestNamespace()),
+		attribute.String("peer.service", sourceServiceName),
+		attribute.String("span.kind", "server"),
+		attribute.String("component", "network-flow"),
+		attribute.String("operation.type", "inbound-receive"),
+
+		// Network details
+		attribute.String("network.protocol.name", flow.Key.Proto()),
+		attribute.Int64("network.local.port", flow.Key.DestPort()),
 
 		// Flow metrics
 		attribute.Int64("flow.packets.in", flow.PacketsIn),
-		attribute.Int64("flow.packets.out", flow.PacketsOut),
 		attribute.Int64("flow.bytes.in", flow.BytesIn),
-		attribute.Int64("flow.bytes.out", flow.BytesOut),
-		attribute.Int64("flow.connections.started", flow.NumConnectionsStarted),
-		attribute.Int64("flow.connections.completed", flow.NumConnectionsCompleted),
 		attribute.Int64("flow.connections.live", flow.NumConnectionsLive),
-
-		// Timing
-		attribute.Int64("flow.start_time", flow.StartTime),
-		attribute.Int64("flow.end_time", flow.EndTime),
-		attribute.Int64("flow.duration", flow.EndTime-flow.StartTime),
+		attribute.Int64("duration.ms", (flow.EndTime-flow.StartTime)*1000),
 	}
 
-	// Add destination service information if available
+	if flow.Key.DestServiceName() != "" {
+		serverAttrs = append(serverAttrs,
+			attribute.String("k8s.service.name", flow.Key.DestServiceName()),
+			attribute.String("k8s.service.namespace", flow.Key.DestServiceNamespace()),
+		)
+	}
+
+	serverSpan.SetAttributes(serverAttrs...)
+
+	// End spans in proper order (server first, then client)
+	serverSpan.SetStatus(codes.Ok, "Flow received successfully")
+	serverSpan.End(trace.WithTimestamp(time.Unix(flow.EndTime, 0)))
+
+	parentSpan.SetStatus(codes.Ok, "Flow sent successfully")
+	parentSpan.End(trace.WithTimestamp(time.Unix(flow.EndTime, 0)))
+
+	return parentCtx, parentSpan
+}
+
+// generateTraceIDFromFlow creates a deterministic trace ID based on flow characteristics
+func generateTraceIDFromFlow(flow *types.Flow) trace.TraceID {
+	if flow == nil || flow.Key == nil {
+		return trace.TraceID{}
+	}
+
+	// Create a hash based on flow key for consistent trace IDs
+	h := fmt.Sprintf("%s->%s:%d@%d",
+		flow.Key.SourceName(),
+		flow.Key.DestName(),
+		flow.Key.DestPort(),
+		flow.StartTime/300) // Group by 5-minute windows
+
+	// Convert to bytes and pad/truncate to 16 bytes for TraceID
+	hashBytes := []byte(h)
+	var traceID [16]byte
+	copy(traceID[:], hashBytes)
+	return trace.TraceID(traceID)
+}
+
+// CreateSimpleServiceTrace creates a simpler service-to-service trace optimized for Jaeger service graph
+// This creates a single span that represents a call from source service to destination service
+func (fi *FlowInstrumentation) CreateSimpleServiceTrace(ctx context.Context, flow *types.Flow) (context.Context, trace.Span) {
+	if flow == nil || flow.Key == nil {
+		return ctx, trace.SpanFromContext(ctx)
+	}
+
+	// Extract clean service names with namespace prefix for uniqueness
+	sourceServiceName := fmt.Sprintf("%s.%s", flow.Key.SourceName(), flow.Key.SourceNamespace())
+	destServiceName := fmt.Sprintf("%s.%s", flow.Key.DestName(), flow.Key.DestNamespace())
+
+	// Use Kubernetes service name if available for cleaner service graph
+	if flow.Key.DestServiceName() != "" {
+		destServiceName = fmt.Sprintf("%s.%s", flow.Key.DestServiceName(), flow.Key.DestServiceNamespace())
+	}
+
+	// Clean up service names to be more readable
+	if sourceServiceName == "." {
+		sourceServiceName = "unknown-source"
+	}
+	if destServiceName == "." {
+		destServiceName = "unknown-dest"
+	}
+
+	// Create operation name that shows the call
+	operationName := fmt.Sprintf("call %s", destServiceName)
+
+	// Create tracer with source service name - this groups spans by service
+	serviceTracer := otel.Tracer(sourceServiceName)
+
+	spanCtx, span := serviceTracer.Start(ctx, operationName,
+		trace.WithSpanKind(trace.SpanKindClient), // Client span indicates outgoing call
+		trace.WithTimestamp(time.Unix(flow.StartTime, 0)),
+	)
+
+	// Essential attributes for Jaeger service graph
+	attrs := []attribute.KeyValue{
+		// Critical: These attributes define the service nodes and edges
+		attribute.String("service.name", sourceServiceName),
+		attribute.String("service.namespace", flow.Key.SourceNamespace()),
+		attribute.String("peer.service", destServiceName), // Key for service graph edges
+
+		// Network context
+		attribute.String("network.protocol.name", flow.Key.Proto()),
+		attribute.Int64("network.peer.port", flow.Key.DestPort()),
+
+		// Flow metrics for observability
+		attribute.Int64("flow.packets.total", flow.PacketsIn+flow.PacketsOut),
+		attribute.Int64("flow.bytes.total", flow.BytesIn+flow.BytesOut),
+		attribute.Int64("flow.connections.active", flow.NumConnectionsLive),
+
+		// Add HTTP-like attributes to make Jaeger happier
+		attribute.String("span.kind", "client"),
+		attribute.String("component", "network-flow"),
+
+		// Add operation type and duration for better tracing
+		attribute.String("operation.type", "network-communication"),
+		attribute.Int64("duration.ms", (flow.EndTime-flow.StartTime)*1000), // Convert to milliseconds
+	}
+
+	// Add destination details for richer context
 	if flow.Key.DestServiceName() != "" {
 		attrs = append(attrs,
-			attribute.String("service.destination.k8s.name", flow.Key.DestServiceName()),
-			attribute.String("service.destination.k8s.namespace", flow.Key.DestServiceNamespace()),
+			attribute.String("k8s.destination.service.name", flow.Key.DestServiceName()),
+			attribute.String("k8s.destination.service.namespace", flow.Key.DestServiceNamespace()),
 		)
 		if flow.Key.DestServicePortName() != "" {
-			attrs = append(attrs, attribute.String("service.destination.k8s.port.name", flow.Key.DestServicePortName()))
+			attrs = append(attrs, attribute.String("k8s.destination.port.name", flow.Key.DestServicePortName()))
 		}
+	}
+
+	// Add protocol-specific attributes
+	switch flow.Key.Proto() {
+	case "tcp":
+		attrs = append(attrs,
+			attribute.String("network.transport", "tcp"),
+			attribute.Bool("network.connection.reliable", true),
+		)
+	case "udp":
+		attrs = append(attrs,
+			attribute.String("network.transport", "udp"),
+			attribute.Bool("network.connection.reliable", false),
+		)
 	}
 
 	span.SetAttributes(attrs...)
 
-	// Set the span end time
+	// End the span with flow end time and mark as successful
+	span.SetStatus(codes.Ok, "Flow completed successfully")
 	span.End(trace.WithTimestamp(time.Unix(flow.EndTime, 0)))
 
 	return spanCtx, span
