@@ -1,0 +1,65 @@
+# Ignore large and unnecessary files/directories for Docker build
+.git
+.gitignore
+.github
+.vscode
+
+# Build artifacts
+*/bin/
+*/build/
+*/*.created
+*/Dockerfile*
+*/docker-image/
+
+# Test and development files
+*/test/
+*/tests/
+*/fv/
+*/*_test.go
+*/dev/
+*/docs/
+
+# Node modules and other language-specific artifacts
+node_modules
+*/node_modules/
+*.log
+*.tmp
+
+# Platform-specific files
+.DS_Store
+Thumbs.db
+
+# Go specific
+*.exe
+*.dll
+*.so
+*.dylib
+
+# IDE files
+*.swp
+*.swo
+*~
+
+# Kubernetes manifests and deployments
+*/manifests/
+*/charts/
+*/release/
+
+# Large binary directories that aren't needed for goldmane
+whisker/
+typha/
+felix/
+confd/
+kube-controllers/
+node/
+networking-calico/
+cni-plugin/
+apiserver/
+app-policy/
+whisker-backend/
+guardian/
+key-cert-provisioner/
+process/
+third_party/
+test-tools/
+pod2daemon/

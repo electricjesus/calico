@@ -1,0 +1,155 @@
+version: '3.8'
+
+services:
+  # HTTP Echo Server for goldmane to push logs to
+  echo-server:
+    image: ealen/echo-server:latest
+    hostname: echo-server
+    container_name: goldmane-echo-server
+    ports:
+      - "3000:80"
+    environment:
+      - PORT=80
+    networks:
+      - goldmane-net
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # OpenTelemetry Collector
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    hostname: otel-collector
+    container_name: goldmane-otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+      - otel-data:/tmp/otel-data
+    ports:
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver
+      - "8888:8888"   # Prometheus metrics
+      - "8889:8889"   # Prometheus exporter metrics
+      - "13133:13133" # Health check extension
+    depends_on:
+      - jaeger
+    networks:
+      - goldmane-net
+
+  # Jaeger for trace visualization
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    hostname: jaeger
+    container_name: goldmane-jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+      - COLLECTOR_ZIPKIN_HOST_PORT=:9411
+    ports:
+      - "16686:16686" # Jaeger UI
+      - "14250:14250" # Jaeger gRPC
+      - "14268:14268" # Jaeger HTTP
+      - "9411:9411"   # Zipkin
+    networks:
+      - goldmane-net
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:14269/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Goldmane service
+  goldmane:
+    build:
+      context: ../..
+      dockerfile: goldmane/dev/Dockerfile.dev
+    hostname: goldmane
+    container_name: goldmane-server
+    ports:
+      - "7443:8443"  # gRPC API
+      - "8080:8080"  # Health check
+      - "9090:9090"  # Prometheus metrics
+    environment:
+      # Basic configuration
+      - LOG_LEVEL=debug
+      - PORT=8443
+      - HEALTH_ENABLED=true
+      - HEALTH_PORT=8080
+      - PROMETHEUS_PORT=9090
+      
+      # Flow aggregation settings
+      - AGGREGATION_WINDOW=15s
+      - EMIT_AFTER_SECONDS=30
+      - EMITTER_AGGREGATION_WINDOW=5m
+      
+      # Push configuration for echo server
+      - PUSH_URL=http://echo-server/flows
+      
+      # OpenTelemetry configuration
+      - OTLP_URL=otel-collector:4317
+      - OTLP_INSECURE=true
+      - OTLP_SERVICE_NAME=goldmane
+      - OTLP_SERVICE_NAMESPACE=dev
+      - OTLP_SERVICE_VERSION=dev
+      - OTLP_SAMPLING_RATE=1.0
+      - OTLP_LOG_LEVEL=debug
+      
+      # TLS configuration (disable for development)
+      - TLS_DISABLED=true
+      
+    volumes:
+      # Mount certificates if needed (commented out for development)
+      # - ./certs:/certs:ro
+      - goldmane-data:/data
+    depends_on:
+      echo-server:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    networks:
+      - goldmane-net
+    healthcheck:
+      test: ["CMD", "/health", "--ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # Flow generator service
+  flowgen:
+    build:
+      context: ../..
+      dockerfile: goldmane/dev/Dockerfile.flowgen.dev
+    hostname: flowgen
+    container_name: goldmane-flowgen
+    environment:
+      - SERVER=goldmane:8443
+      # For development without TLS
+      - TLS_DISABLED=true
+      # Certificate paths (when TLS is enabled)
+      # - CLIENT_CERT=/certs/client.crt
+      # - CLIENT_KEY=/certs/client.key
+      # - CA_FILE=/certs/ca.crt
+    # volumes:
+      # Mount certificates if needed when TLS is enabled
+      # - ./certs:/certs:ro
+    depends_on:
+      goldmane:
+        condition: service_healthy
+    networks:
+      - goldmane-net
+    restart: unless-stopped
+
+networks:
+  goldmane-net:
+    driver: bridge
+    name: goldmane-network
+
+volumes:
+  goldmane-data:
+    name: goldmane-data
+  otel-data:
+    name: goldmane-otel-data

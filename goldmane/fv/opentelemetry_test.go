@@ -454,6 +454,12 @@ func TestOpenTelemetryEndToEnd(t *testing.T) {
 		if len(receiveSpans) == 0 {
 			logrus.Warn("No receive spans found - might be timing issue")
 		}
+
+		// Print raw requests for debugging
+		rawRequests := collector.GetRawRequestsTextFormat()
+		for _, req := range rawRequests {
+			t.Error(req + "\n")
+		}
 	})
 }
 

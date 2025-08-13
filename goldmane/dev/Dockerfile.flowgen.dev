@@ -1,0 +1,22 @@
+FROM golang:1.24-alpine AS builder
+
+# Install git and other build dependencies
+RUN apk add --no-cache git
+
+WORKDIR /src
+
+# Copy source code first (needed for local module replacements)
+COPY . .
+
+# Download dependencies (after source is copied due to local replacements)
+RUN go mod download
+
+# Build flowgen binary
+RUN CGO_ENABLED=0 GOOS=linux go build -o bin/flowgen ./goldmane/cmd/flowgen
+
+# Final stage
+FROM scratch
+
+COPY --from=builder /src/bin/flowgen /flowgen
+
+CMD ["/flowgen"]

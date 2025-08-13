@@ -1,0 +1,71 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+
+  # Add memory limiter to prevent OOM
+  memory_limiter:
+    limit_mib: 400
+    check_interval: 1s
+
+exporters:
+  # Export to Jaeger via internal OTLP (since Jaeger has OTLP enabled)
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  # Export to debug for debugging
+  debug:
+    verbosity: detailed
+
+  # Export raw traces to file for analysis
+  file:
+    path: /tmp/otel-data/traces.json
+    rotation:
+      max_megabytes: 10
+      max_days: 7
+      max_backups: 3
+
+  # Prometheus metrics exporter
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    const_labels:
+      service: "goldmane-otel-collector"
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+  pprof:
+    endpoint: 0.0.0.0:1777
+
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+service:
+  extensions: [health_check, pprof, zpages]
+  
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/jaeger, debug, file]
+    
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus, debug]
+
+  telemetry:
+    logs:
+      level: "debug"

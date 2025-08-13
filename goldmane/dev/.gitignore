@@ -1,0 +1,28 @@
+# Environment files
+.env
+
+# Docker volumes
+volumes/
+
+# Generated certificates
+certs/
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+tmp/
+
+# Backup files
+*.bak
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db

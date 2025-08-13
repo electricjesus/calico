@@ -267,6 +267,17 @@ func (m *mockOTLPCollector) GetRawRequests() []*otlptracev1.ExportTraceServiceRe
 	return append([]*otlptracev1.ExportTraceServiceRequest{}, m.requests...)
 }
 
+func (m *mockOTLPCollector) GetRawRequestsTextFormat() []string {
+	m.Lock()
+	defer m.Unlock()
+
+	var rawRequests []string
+	for _, req := range m.requests {
+		rawRequests = append(rawRequests, req.String())
+	}
+	return rawRequests
+}
+
 // Close stops the mock collector and releases resources
 func (m *mockOTLPCollector) Close() {
 	m.server.Stop()
