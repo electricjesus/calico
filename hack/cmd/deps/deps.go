@@ -23,6 +23,13 @@ import (
 	"github.com/projectcalico/calico/libcalico-go/lib/set"
 )
 
+// Global caches for expensive operations
+var (
+	packageDepsCache = make(map[string][]string)
+	packageDepsMutex sync.RWMutex
+	gitGrepAvailable *bool
+)
+
 func printUsageAndExit() {
 	_, _ = fmt.Fprint(os.Stderr, `CI Dependency helper tool.
 
@@ -162,6 +169,9 @@ var extraPrereqRegexps = map[string]*regexp.Regexp{
 	"/libcalico-go/lib/ipam": regexp.MustCompile(`\.IPAM\(\)`),
 }
 
+// hasExtraPrereqs is pre-computed to avoid repeated map length checks.
+var hasExtraPrereqs = len(extraPrereqRegexps) > 0
+
 // calculateDeps calculates the file-level dependencies of the input package
 // specs.  Each package spec is a comma-delimited list of directories relative
 // to the root of the repo.  The first entry in the list is the "primary"
@@ -218,8 +228,16 @@ func formatChangeIn(inclusions set.Set[string], exclusions set.Set[string], pret
 		incl = "\n" + strings.ReplaceAll(incl, ",", ",\n  ") + "\n"
 		excl = "\n" + strings.ReplaceAll(excl, ",", ",\n  ") + "\n"
 	}
-	out := fmt.Sprintf("change_in(%s, {pipeline_file: 'ignore', exclude: %s%s})", incl, excl, defaultBranchStanza)
-	return out
+	// Use strings.Builder for efficient concatenation
+	var b strings.Builder
+	b.Grow(len(incl) + len(excl) + len(defaultBranchStanza) + 60)
+	b.WriteString("change_in(")
+	b.WriteString(incl)
+	b.WriteString(", {pipeline_file: 'ignore', exclude: ")
+	b.WriteString(excl)
+	b.WriteString(defaultBranchStanza)
+	b.WriteString("})")
+	return b.String()
 }
 
 type Deps struct {
@@ -288,6 +306,16 @@ func calculateSemDeps(pkgList string) (deps *Deps, err error) {
 }
 
 func filterInclusions(primaryPkg string, inclusions set.Set[string]) set.Typed[string] {
+	// Early return if no extra prerequisites configured
+	if !hasExtraPrereqs {
+		// Convert to Typed for return type compatibility
+		result := set.New[string]()
+		for item := range inclusions.All() {
+			result.Add(item)
+		}
+		return result
+	}
+
 	out := set.New[string]()
 
 	conditionalIncludes := map[string]*regexp.Regexp{}
@@ -336,15 +364,109 @@ func filterInclusions(primaryPkg string, inclusions set.Set[string]) set.Typed[s
 	return out
 }
 
+
+// checkGitGrepAvailable checks if git grep is available and caches the result
+func checkGitGrepAvailable() bool {
+if gitGrepAvailable != nil {
+return *gitGrepAvailable
+}
+cmd := exec.Command("git", "grep", "--help")
+err := cmd.Run()
+result := err == nil
+gitGrepAvailable = &result
+return result
+}
+
+// filterInclusionsWithGitGrep uses git grep for fast searching instead of walking/reading files
+func filterInclusionsWithGitGrep(primaryPkg string, inclusions set.Set[string]) set.Typed[string] {
+	// Early return if no extra prerequisites configured
+	if !hasExtraPrereqs {
+		// Convert to Typed for return type compatibility
+		result := set.New[string]()
+		for item := range inclusions.All() {
+			result.Add(item)
+		}
+		return result
+	}
+
+	out := set.New[string]()
+	conditionalIncludes := map[string]*regexp.Regexp{}
+	for item := range inclusions.All() {
+if r := extraPrereqRegexps[item]; r != nil {
+conditionalIncludes[item] = r
+} else {
+out.Add(item)
+}
+}
+
+if len(conditionalIncludes) == 0 {
+return out
+}
+
+// Use git grep in parallel for each regex pattern
+var wg sync.WaitGroup
+var mutex sync.Mutex
+
+for item, re := range conditionalIncludes {
+wg.Add(1)
+go func(item string, re *regexp.Regexp) {
+defer wg.Done()
+
+// Convert Go regex to a simpler pattern for git grep
+// For IPAM check: regexp.MustCompile(`\.IPAM\(\)`)
+// We can search for ".IPAM(" which is simpler
+pattern := re.String()
+// Simplify common patterns
+if strings.Contains(pattern, `\.IPAM\(\)`) {
+pattern = ".IPAM("
+}
+
+cmd := exec.Command("git", "grep", "-l", "-F", pattern, primaryPkg)
+if err := cmd.Run(); err == nil {
+// Found matches
+mutex.Lock()
+out.Add(item)
+mutex.Unlock()
+}
+// No matches or error means we skip this inclusion
+}(item, re)
+}
+wg.Wait()
+
+return out
+}
+
+// smartFilterInclusions chooses the best implementation based on what's available
+func smartFilterInclusions(primaryPkg string, inclusions set.Set[string]) set.Typed[string] {
+if checkGitGrepAvailable() {
+return filterInclusionsWithGitGrep(primaryPkg, inclusions)
+}
+return filterInclusions(primaryPkg, inclusions)
+}
+
+
 func formatSemList(s set.Set[string]) string {
 	items := s.Slice()
 	sort.Strings(items)
 
-	var quoted []string
-	for _, s := range items {
-		quoted = append(quoted, fmt.Sprintf("'%s'", s))
+	if len(items) == 0 {
+		return "[]"
 	}
-	return "[" + strings.Join(quoted, ",") + "]"
+
+	// Use strings.Builder for efficient string concatenation
+	var b strings.Builder
+	b.Grow(len(items) * 20) // rough estimate
+	b.WriteByte('[')
+	for i, item := range items {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteByte('\'')
+		b.WriteString(item)
+		b.WriteByte('\'')
+	}
+	b.WriteByte(']')
+	return b.String()
 }
 
 func printLocalDirs(pkg string, mainsOnly bool) {
@@ -396,15 +518,17 @@ func loadLocalDirs(pkg string, mainDepsOnly bool) (out []string, err error) {
 		logrus.Fatalln("Failed to load package deps:", err)
 		os.Exit(1)
 	}
+	// Pre-allocate slice (typically ~30% of deps are local)
+	out = make([]string, 0, len(packageDeps)/3)
+	const ourPackage = "github.com/projectcalico/calico"
 	for _, pkg := range packageDeps {
-		const ourPackage = "github.com/projectcalico/calico"
 		if strings.HasPrefix(pkg, ourPackage+"/") {
 			pkg = strings.TrimPrefix(pkg, ourPackage)
 			out = append(out, pkg)
 		}
 	}
 
-	out = filterInclusions(pkg, set.FromArray(out)).Slice()
+	out = smartFilterInclusions(pkg, set.FromArray(out)).Slice()
 	sort.Strings(out)
 	return out, nil
 }
@@ -445,7 +569,20 @@ func printModules(pkg string) {
 }
 
 func loadPackageDeps(pkg string, mainDepsOnly bool) ([]string, error) {
-	pkgs := []string{"./..."}
+// Check cache first
+cacheKey := pkg + fmt.Sprintf(":%v", mainDepsOnly)
+packageDepsMutex.RLock()
+if cached, ok := packageDepsCache[cacheKey]; ok {
+packageDepsMutex.RUnlock()
+logrus.Debugf("Using cached package deps for %s (mainDepsOnly=%v)", pkg, mainDepsOnly)
+return cached, nil
+}
+packageDepsMutex.RUnlock()
+
+// Not in cache, calculate it
+logrus.Debugf("Calculating package deps for %s (mainDepsOnly=%v)", pkg, mainDepsOnly)
+
+pkgs := []string{"./..."}
 
 	if mainDepsOnly {
 		var err error
@@ -476,6 +613,12 @@ func loadPackageDeps(pkg string, mainDepsOnly bool) ([]string, error) {
 		out = append(out, dep)
 		logrus.Debugf("Loaded package: %s", strings.TrimRight(string(line), "\n"))
 	}
+
+	// Store in cache
+	packageDepsMutex.Lock()
+	packageDepsCache[cacheKey] = out
+	packageDepsMutex.Unlock()
+
 	return out, nil
 }
 
